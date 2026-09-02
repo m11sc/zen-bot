@@ -1,19 +1,29 @@
 """
-Бот для Яндекс Дзена: сам придумывает тему, пишет статью и присылает
-готовый текст в Telegram — публикуете вы вручную.
+Бот для Яндекс Дзена: сам придумывает тему, пишет статью и публикует её
+прямо в Telegram-канал (без ручного копирования).
 
 Полностью бесплатная схема:
   - генерация текста — Google Gemini API (бесплатный тариф)
-  - публикация — Telegram Bot API (бесплатно)
+  - публикация — Telegram Bot API, прямо в канал (бесплатно)
   - расписание — GitHub Actions (бесплатно) или cron на своём ПК
 
 Что нужно перед запуском:
 1. pip install google-genai requests --break-system-packages
 2. Получить бесплатный ключ Gemini: https://ai.google.dev (кнопка "Get API key")
-3. Переменные окружения:
+3. Создать Telegram-бота через @BotFather, получить токен
+4. Создать Telegram-канал (или использовать существующий), добавить бота
+   в канал как АДМИНИСТРАТОРА (с правом публикации сообщений)
+5. Переменные окружения:
    GEMINI_API_KEY      — ключ API Google Gemini (бесплатный)
    TELEGRAM_BOT_TOKEN  — токен бота от @BotFather
-   TELEGRAM_CHAT_ID    — ваш chat_id (узнать через @userinfobot или /getUpdates)
+   TELEGRAM_CHAT_ID    — username канала вида @my_channel (если канал публичный)
+                         или числовой id канала вида -1001234567890 (если приватный)
+
+Как узнать числовой id приватного канала:
+   Перешлите любое сообщение из канала боту @userinfobot — но проще:
+   опубликуйте один пост в канале от имени бота вручную через API
+   (curl/Postman) и посмотрите поле "chat":{"id": ...} в ответе,
+   либо добавьте в канал бота @RawDataBot — он покажет id в первом же посте.
 
 Запуск вручную:
    python3 zen_bot.py
@@ -24,7 +34,6 @@
 import os
 import json
 import time
-import textwrap
 from datetime import datetime
 
 from google import genai
@@ -107,17 +116,36 @@ def generate_topic():
 # ---------- Шаг 2. Написать статью нужной длины ----------
 
 def generate_article(topic):
-    prompt = f"""Напиши статью для Яндекс Дзена на тему: «{topic}»
+    prompt = f"""Ты — опытный автор популярных статей для Яндекс Дзена с миллионами прочтений.
+Напиши статью на тему: «{topic}»
 
-Требования:
-- Длина СТРОГО 3300–5700 знаков с пробелами (примерно 470–815 слов). Это обязательное условие.
-- Разговорный, живой стиль — как будто автор объясняет другу, без канцелярита и воды.
-- Структура: цепляющий заголовок, короткое вступление (проблема/вопрос), 3–5 смысловых блоков
-  с подзаголовками, короткий вывод в конце.
-- Никаких списков литературы, ссылок, markdown-разметки (**, ##) — только заголовок и обычный текст
-  с подзаголовками на отдельных строках.
-- Без слова "итак" в начале и без канцелярских штампов ("в данной статье", "актуальность темы").
-- Заголовок — с новой строки в самом начале, без слова "Заголовок:".
+СТРОГИЕ ТРЕБОВАНИЯ К СТИЛЮ:
+- Пиши как живой человек, а не как ИИ: короткие и средние предложения, разговорные обороты,
+  живые примеры из повседневной жизни, лёгкая ирония там, где уместно.
+- Каждый абзац — 2-4 предложения, не больше. Длинные "простыни" текста читатель на Дзене не читает.
+- Никаких общих фраз и воды ("это важно", "многие сталкиваются с этой проблемой") — сразу конкретика,
+  примеры, цифры, детали.
+- Обращайся к читателю на "вы", вовлекай вопросами, но не переусердствуй.
+- Не повторяй одну и ту же мысль разными словами в разных абзацах — у каждого абзаца своя новая мысль.
+- Не используй канцелярит и штампы: "актуальность темы", "в данной статье", "подводя итог".
+
+СТРУКТУРА (обязательно):
+1. Заголовок — цепляющий, конкретный, без кликбейта и кавычек. Отдельной первой строкой.
+2. Вступление (2-3 абзаца) — зацепи проблемой, вопросом или неожиданным фактом, из-за которого
+   читатель захочет дочитать до конца.
+3. Основная часть — 3-5 смысловых блоков, у каждого свой короткий подзаголовок (3-6 слов).
+   В каждом блоке — конкретная мысль, раскрытая на примере или объяснении, без воды.
+4. Короткий вывод (1-2 абзаца) — не пересказ статьи заново, а главная мысль и что с ней делать.
+
+ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ:
+- Длина СТРОГО 3300–5700 знаков с пробелами (примерно 470–815 слов).
+- Заголовки блоков — каждый на отдельной строке, БЕЗ markdown-символов (без **, ##, -, *).
+  Просто текст подзаголовка на отдельной строке.
+- Между абзацами — пустая строка.
+- Никаких списков литературы, ссылок, хэштегов.
+
+Прежде чем писать, продумай: какая одна главная мысль должна остаться у читателя после прочтения?
+Вся статья должна вести именно к ней.
 
 Ответь только готовым текстом статьи, без комментариев до или после."""
 
@@ -145,24 +173,88 @@ def regenerate_if_wrong_length(topic, article, attempts=2):
     return article
 
 
-# ---------- Шаг 3. Отправить в Telegram ----------
+# ---------- Шаг 3. Опубликовать в Telegram-канал ----------
+
+def format_article_html(article):
+    """
+    Превращает обычный текст статьи в HTML для Telegram:
+    - первая строка (заголовок) — жирным и крупнее визуально за счёт emoji-разделителя
+    - короткие строки-подзаголовки (без точки в конце, до 6 слов) — тоже жирным
+    """
+    lines = [l.strip() for l in article.split("\n")]
+    # убираем пустые строки в начале/конце
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+
+    if not lines:
+        return article
+
+    title = lines[0]
+    body_lines = lines[1:]
+
+    html_parts = [f"<b>{escape_html(title)}</b>"]
+
+    for line in body_lines:
+        if not line:
+            continue
+        word_count = len(line.split())
+        looks_like_subheading = (
+            word_count <= 6
+            and not line.endswith((".", "!", "?", ","))
+            and len(line) < 60
+        )
+        if looks_like_subheading:
+            html_parts.append(f"\n<b>{escape_html(line)}</b>")
+        else:
+            html_parts.append(escape_html(line))
+
+    return "\n\n".join(html_parts)
+
+
+def escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 def send_to_telegram(topic, article):
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]  # username канала (@my_channel) или его числовой id (-100...)
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
-    length = len(article)
-    header = f"📝 Новая статья готова\nТема: {topic}\nДлина: {length} знаков\n\n"
+    formatted = format_article_html(article)
 
     # Telegram режет сообщения по 4096 символов — статья может быть длиннее,
-    # поэтому шлём частями.
-    full_text = header + article
-    chunks = textwrap.wrap(full_text, 4000, replace_whitespace=False, break_long_words=False)
+    # поэтому шлём частями по абзацам, не разрывая HTML-теги на середине.
+    chunks = split_html_safely(formatted, 4000)
 
     for chunk in chunks:
-        resp = requests.post(url, data={"chat_id": chat_id, "text": chunk})
+        resp = requests.post(url, data={
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "HTML",
+        })
+        if not resp.ok:
+            print(f"Ошибка Telegram: {resp.status_code} {resp.text}")
         resp.raise_for_status()
+
+
+def split_html_safely(text, max_len):
+    """Режет текст на части по границам абзацев (\n\n), чтобы не разорвать HTML-тег пополам."""
+    paragraphs = text.split("\n\n")
+    chunks = []
+    current = ""
+    for p in paragraphs:
+        candidate = (current + "\n\n" + p) if current else p
+        if len(candidate) > max_len:
+            if current:
+                chunks.append(current)
+            current = p
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 # ---------- Основной сценарий ----------
