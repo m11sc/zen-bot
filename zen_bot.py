@@ -64,13 +64,16 @@ def ask_gemini(prompt, max_tokens=3000, retries=5):
             resp = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config={"max_output_tokens": max_tokens},
+                config={
+                    "max_output_tokens": max_tokens,
+                    "http_options": {"timeout": 60000},  # 60 секунд на запрос, чтобы не зависало навсегда
+                },
             )
             return resp.text.strip()
         except genai_errors.ServerError as e:
             # 503 — сервер Gemini временно перегружен, ждём и пробуем снова
             wait = 15 * (attempt + 1)
-            print(f"Сервер Gemini занят ({e}). Пробую снова через {wait} сек...")
+            print(f"Сервер Gemini занят ({e}). Пробую снова через {wait} сек...", flush=True)
             time.sleep(wait)
     raise RuntimeError("Gemini не ответил после нескольких попыток — попробуйте запустить бота позже.")
 
@@ -260,21 +263,21 @@ def split_html_safely(text, max_len):
 # ---------- Основной сценарий ----------
 
 def main():
-    print("Придумываю тему...")
+    print("Придумываю тему...", flush=True)
     topic = generate_topic()
-    print(f"Тема: {topic}")
+    print(f"Тема: {topic}", flush=True)
 
-    print("Пишу статью...")
+    print("Пишу статью...", flush=True)
     article = generate_article(topic)
     article = regenerate_if_wrong_length(topic, article)
 
-    print(f"Готово. Длина: {len(article)} знаков.")
+    print(f"Готово. Длина: {len(article)} знаков.", flush=True)
 
-    print("Отправляю в Telegram...")
+    print("Отправляю в Telegram...", flush=True)
     send_to_telegram(topic, article)
 
     save_used_topic(topic)
-    print("Готово! Проверьте Telegram.")
+    print("Готово! Проверьте Telegram.", flush=True)
 
 
 if __name__ == "__main__":
@@ -306,6 +309,7 @@ if __name__ == "__main__":
 #      jobs:
 #        run:
 #          runs-on: ubuntu-latest
+#          timeout-minutes: 10   # если что-то зависнет — job остановится сам через 10 минут
 #          steps:
 #            - uses: actions/checkout@v4
 #            - uses: actions/setup-python@v5
