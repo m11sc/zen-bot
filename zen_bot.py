@@ -37,8 +37,12 @@ import requests
 
 # ---------- Настройки ----------
 
-TARGET_MIN_CHARS = 3300
-TARGET_MAX_CHARS = 5700
+TELEGRAM_MESSAGE_LIMIT = 4096  # жёсткий лимит Telegram на одно сообщение
+
+# Целевая длина самого текста статьи (без HTML-тегов). Взята с запасом от лимита Telegram,
+# чтобы после добавления <b>...</b> для заголовка/подзаголовков пост всё равно помещался в одно сообщение.
+TARGET_MIN_CHARS = 2800
+TARGET_MAX_CHARS = 3800
 
 # Общая ниша канала — задаёт тон и рамку для тем.
 # Отредактируйте под свой канал (сейчас настроено под "Апгрейд" — саморазвитие).
@@ -143,7 +147,9 @@ def generate_article(topic):
 - Никаких markdown-символов: без **, ##, |, таблиц. Только обычный текст и дефисы для списков.
 - Не повторяй одну мысль разными словами в разных абзацах.
 
-ДЛИНА: строго 3300–5700 знаков с пробелами (примерно 470–815 слов).
+ДЛИНА: строго 2800–3800 знаков с пробелами (примерно 400–540 слов). Это важно: пост должен
+целиком помещаться в ОДНО сообщение Telegram (лимит 4096 знаков), поэтому не превышай верхнюю
+границу — лучше чуть короче и ёмче, чем длиннее.
 
 Прежде чем писать, продумай: какая одна мысль должна зацепить читателя и остаться в голове
 после прочтения? Весь пост должен вести именно к ней.
@@ -313,38 +319,38 @@ def send_to_telegram(topic, article):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
     formatted = format_article_html(article)
+    safe_limit = TELEGRAM_MESSAGE_LIMIT - 50  # небольшой запас на всякий случай
 
-    # Telegram режет сообщения по 4096 символов — статья может быть длиннее,
-    # поэтому шлём частями по абзацам, не разрывая HTML-теги на середине.
-    chunks = split_html_safely(formatted, 4000)
+    # Подстраховка: если из-за HTML-разметки (<b> и т.д.) текст всё же не влез —
+    # просим модель сократить именно исходный текст и форматируем заново, а не режем на части.
+    attempts = 0
+    while len(formatted) > safe_limit and attempts < 2:
+        print(f"После форматирования пост {len(formatted)} знаков — длиннее лимита, сокращаю...", flush=True)
+        shrink_prompt = f"""Вот пост:
 
-    for chunk in chunks:
-        resp = requests.post(url, data={
-            "chat_id": chat_id,
-            "text": chunk,
-            "parse_mode": "HTML",
-        })
-        if not resp.ok:
-            print(f"Ошибка Telegram: {resp.status_code} {resp.text}")
-        resp.raise_for_status()
+{article}
 
+Он получился слишком длинным для одного сообщения Telegram. Сократи его до 2500–3000 знаков
+с пробелами, сохранив стиль, крючок в начале и главную мысль. Убери менее важные детали,
+а не просто обрывай текст. Ответь только сокращённым текстом поста."""
+        article = ask_groq(shrink_prompt, max_tokens=4000)
+        formatted = format_article_html(article)
+        attempts += 1
 
-def split_html_safely(text, max_len):
-    """Режет текст на части по границам абзацев (\n\n), чтобы не разорвать HTML-тег пополам."""
-    paragraphs = text.split("\n\n")
-    chunks = []
-    current = ""
-    for p in paragraphs:
-        candidate = (current + "\n\n" + p) if current else p
-        if len(candidate) > max_len:
-            if current:
-                chunks.append(current)
-            current = p
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+    if len(formatted) > safe_limit:
+        raise RuntimeError(
+            f"Пост всё ещё превышает лимит Telegram после сокращения ({len(formatted)} знаков). "
+            "Запустите бота ещё раз."
+        )
+
+    resp = requests.post(url, data={
+        "chat_id": chat_id,
+        "text": formatted,
+        "parse_mode": "HTML",
+    })
+    if not resp.ok:
+        print(f"Ошибка Telegram: {resp.status_code} {resp.text}")
+    resp.raise_for_status()
 
 
 # ---------- Основной сценарий ----------
