@@ -47,7 +47,7 @@ CHANNEL_THEME = "саморазвитие, психология привычек
 USED_TOPICS_FILE = "used_topics.json"
 
 # Бесплатная модель Groq с щедрым дневным лимитом и хорошим качеством текста
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
@@ -63,6 +63,13 @@ def ask_groq(prompt, max_tokens=3000, retries=5):
             )
             return resp.choices[0].message.content.strip()
         except (groq_errors.RateLimitError, groq_errors.APIStatusError, groq_errors.APIConnectionError) as e:
+            status_code = getattr(e, "status_code", None)
+            if status_code == 404:
+                raise RuntimeError(
+                    f"Модель '{GROQ_MODEL}' не найдена или недоступна на Groq. "
+                    "Проверьте актуальное название модели на console.groq.com/docs/models "
+                    "и обновите GROQ_MODEL в начале скрипта."
+                ) from e
             wait = 20 * (attempt + 1)
             print(f"Groq занят/недоступен ({e}). Пробую снова через {wait} сек...", flush=True)
             time.sleep(wait)
