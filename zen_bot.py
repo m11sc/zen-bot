@@ -1,9 +1,10 @@
 """
-Бот для Яндекс Дзена: сам придумывает тему, пишет статью и публикует её
-прямо в Telegram-канал (без ручного копирования).
+Бот для Яндекс Дзена: сам придумывает тему, пишет статью, генерирует картинку
+и публикует всё прямо в Telegram-канал (без ручного копирования).
 
 Полностью бесплатная схема:
   - генерация текста — Groq API (бесплатный тариф, щедрый лимит — до 14 400 запросов/день)
+  - генерация картинки — Pollinations.ai (бесплатно, без API-ключа)
   - публикация — Telegram Bot API, прямо в канал (бесплатно)
   - расписание — GitHub Actions (бесплатно) или cron на своём ПК
 
@@ -406,6 +407,69 @@ def send_to_telegram(topic, article):
     resp.raise_for_status()
 
 
+# ---------- Шаг 4. Сгенерировать и отправить картинку к посту ----------
+
+def generate_image_prompt(topic):
+    """Просит модель придумать короткий промпт на английском для генерации картинки — так
+    качество генерации через Pollinations выше, чем при промпте на русском."""
+    prompt = f"""Придумай короткий промпт на английском языке для генерации иллюстрации
+к посту на тему: «{topic}»
+
+Требования:
+- Стиль: минималистичная плоская иллюстрация (flat illustration), мягкие тёплые цвета,
+  без текста и надписей на картинке, без человеческих лиц крупным планом.
+- Промпт должен описывать конкретную визуальную сцену или метафору, связанную с темой поста,
+  а не абстрактные слова вроде "самосовершенствование".
+- Длина: одна строка, 10-20 слов на английском.
+
+Ответь только текстом промпта, без пояснений и кавычек."""
+
+    try:
+        return ask_groq(prompt, max_tokens=100, retries=2)
+    except Exception as e:
+        print(f"Не удалось придумать промпт для картинки ({e}) — использую тему напрямую.", flush=True)
+        return topic
+
+
+def fetch_image_bytes(image_prompt, retries=3):
+    """Получает картинку с бесплатного сервиса Pollinations.ai (без API-ключа)."""
+    import urllib.parse
+    encoded = urllib.parse.quote(image_prompt)
+    seed = int(time.time())
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}"
+
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            if resp.headers.get("content-type", "").startswith("image/"):
+                return resp.content
+            raise ValueError(f"Сервис вернул не картинку: {resp.headers.get('content-type')}")
+        except Exception as e:
+            wait = 10 * (attempt + 1)
+            print(f"Не удалось получить картинку ({e}). Пробую снова через {wait} сек...", flush=True)
+            time.sleep(wait)
+
+    return None
+
+
+def send_photo_to_telegram(image_bytes):
+    """Отправляет картинку в канал отдельным сообщением, без подписи (текст поста идёт следом)."""
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+
+    resp = requests.post(
+        url,
+        data={"chat_id": chat_id},
+        files={"photo": ("image.jpg", image_bytes, "image/jpeg")},
+        timeout=60,
+    )
+    if not resp.ok:
+        print(f"Ошибка отправки картинки: {resp.status_code} {resp.text}", flush=True)
+    resp.raise_for_status()
+
+
 # ---------- Основной сценарий ----------
 
 def main():
@@ -419,7 +483,21 @@ def main():
 
     print(f"Готово. Длина: {len(article)} знаков.", flush=True)
 
-    print("Отправляю в Telegram...", flush=True)
+    print("Придумываю картинку...", flush=True)
+    image_prompt = generate_image_prompt(topic)
+    print(f"Промпт картинки: {image_prompt}", flush=True)
+    image_bytes = fetch_image_bytes(image_prompt)
+
+    if image_bytes:
+        print("Отправляю картинку в Telegram...", flush=True)
+        try:
+            send_photo_to_telegram(image_bytes)
+        except Exception as e:
+            print(f"Не удалось отправить картинку ({e}) — публикую только текст.", flush=True)
+    else:
+        print("Картинка не получена — публикую только текст.", flush=True)
+
+    print("Отправляю текст в Telegram...", flush=True)
     send_to_telegram(topic, article)
 
     save_used_topic(topic)
