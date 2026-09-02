@@ -3,27 +3,21 @@
 прямо в Telegram-канал (без ручного копирования).
 
 Полностью бесплатная схема:
-  - генерация текста — Google Gemini API (бесплатный тариф)
+  - генерация текста — Groq API (бесплатный тариф, щедрый лимит — до 14 400 запросов/день)
   - публикация — Telegram Bot API, прямо в канал (бесплатно)
   - расписание — GitHub Actions (бесплатно) или cron на своём ПК
 
 Что нужно перед запуском:
-1. pip install google-genai requests --break-system-packages
-2. Получить бесплатный ключ Gemini: https://ai.google.dev (кнопка "Get API key")
+1. pip install groq requests --break-system-packages
+2. Получить бесплатный ключ Groq: https://console.groq.com/keys (регистрация бесплатная)
 3. Создать Telegram-бота через @BotFather, получить токен
 4. Создать Telegram-канал (или использовать существующий), добавить бота
    в канал как АДМИНИСТРАТОРА (с правом публикации сообщений)
 5. Переменные окружения:
-   GEMINI_API_KEY      — ключ API Google Gemini (бесплатный)
+   GROQ_API_KEY        — ключ API Groq (бесплатный)
    TELEGRAM_BOT_TOKEN  — токен бота от @BotFather
    TELEGRAM_CHAT_ID    — username канала вида @my_channel (если канал публичный)
                          или числовой id канала вида -1001234567890 (если приватный)
-
-Как узнать числовой id приватного канала:
-   Перешлите любое сообщение из канала боту @userinfobot — но проще:
-   опубликуйте один пост в канале от имени бота вручную через API
-   (curl/Postman) и посмотрите поле "chat":{"id": ...} в ответе,
-   либо добавьте в канал бота @RawDataBot — он покажет id в первом же посте.
 
 Запуск вручную:
    python3 zen_bot.py
@@ -36,8 +30,8 @@ import json
 import time
 from datetime import datetime
 
-from google import genai
-from google.genai import errors as genai_errors
+from groq import Groq
+import groq as groq_errors
 import requests
 
 # ---------- Настройки ----------
@@ -52,30 +46,27 @@ CHANNEL_THEME = "саморазвитие, психология привычек
 # Файл, где бот запоминает уже использованные темы, чтобы не повторяться
 USED_TOPICS_FILE = "used_topics.json"
 
-# Бесплатная модель Gemini с щедрым дневным лимитом
-GEMINI_MODEL = "gemini-3.6-flash"
+# Бесплатная модель Groq с щедрым дневным лимитом и хорошим качеством текста
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
-def ask_gemini(prompt, max_tokens=3000, retries=5):
+def ask_groq(prompt, max_tokens=3000, retries=5):
     for attempt in range(retries):
         try:
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config={
-                    "max_output_tokens": max_tokens,
-                    "http_options": {"timeout": 60000},  # 60 секунд на запрос, чтобы не зависало навсегда
-                },
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=max_tokens,
+                timeout=120,
             )
-            return resp.text.strip()
-        except genai_errors.ServerError as e:
-            # 503 — сервер Gemini временно перегружен, ждём и пробуем снова
-            wait = 15 * (attempt + 1)
-            print(f"Сервер Gemini занят ({e}). Пробую снова через {wait} сек...", flush=True)
+            return resp.choices[0].message.content.strip()
+        except (groq_errors.RateLimitError, groq_errors.APIStatusError, groq_errors.APIConnectionError) as e:
+            wait = 20 * (attempt + 1)
+            print(f"Groq занят/недоступен ({e}). Пробую снова через {wait} сек...", flush=True)
             time.sleep(wait)
-    raise RuntimeError("Gemini не ответил после нескольких попыток — попробуйте запустить бота позже.")
+    raise RuntimeError("Groq не ответил после нескольких попыток — попробуйте запустить бота позже.")
 
 
 # ---------- Шаг 1. Придумать тему ----------
@@ -112,7 +103,7 @@ def generate_topic():
 
 Ответь ТОЛЬКО темой статьи, одной строкой, без кавычек, без пояснений."""
 
-    topic = ask_gemini(prompt, max_tokens=300)
+    topic = ask_groq(prompt, max_tokens=300)
     return topic
 
 
@@ -152,7 +143,7 @@ def generate_article(topic):
 
 Ответь только готовым текстом статьи, без комментариев до или после."""
 
-    article = ask_gemini(prompt, max_tokens=6000)
+    article = ask_groq(prompt, max_tokens=6000)
     return article
 
 
@@ -171,7 +162,7 @@ def regenerate_if_wrong_length(topic, article, attempts=2):
 Текущая длина: {length} знаков. Нужно {direction}, чтобы уложиться СТРОГО в 3300–5700 знаков
 с пробелами. Перепиши статью целиком с учётом этого, сохранив стиль и структуру."""
 
-        article = ask_gemini(fix_prompt, max_tokens=6000)
+        article = ask_groq(fix_prompt, max_tokens=6000)
 
     return article
 
@@ -298,7 +289,7 @@ if __name__ == "__main__":
 # Вариант B — GitHub Actions (не нужен свой сервер, бесплатно):
 #   1. Положить этот файл и requirements.txt в репозиторий на GitHub.
 #   2. В настройках репозитория: Settings → Secrets and variables → Actions
-#      добавить GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+#      добавить GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 #   3. Создать файл .github/workflows/daily.yml:
 #
 #      name: daily-article
@@ -309,16 +300,16 @@ if __name__ == "__main__":
 #      jobs:
 #        run:
 #          runs-on: ubuntu-latest
-#          timeout-minutes: 10   # если что-то зависнет — job остановится сам через 10 минут
+#          timeout-minutes: 15   # если что-то зависнет — job остановится сам через 15 минут
 #          steps:
 #            - uses: actions/checkout@v4
 #            - uses: actions/setup-python@v5
 #              with:
 #                python-version: '3.11'
-#            - run: pip install google-genai requests
+#            - run: pip install groq requests
 #            - run: python3 zen_bot.py
 #              env:
-#                GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+#                GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
 #                TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 #                TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 #            - run: |
