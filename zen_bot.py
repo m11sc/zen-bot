@@ -151,7 +151,8 @@ def generate_article(topic):
 ЧЕГО ИЗБЕГАТЬ:
 - Никакого канцелярита и штампов: "актуальность темы", "в данной статье", "подводя итог",
   "это важно", "многие сталкиваются с этой проблемой".
-- Никаких markdown-символов: без **, ##, |, таблиц. Только обычный текст и дефисы для списков.
+- Никаких markdown-символов: без **, ##, |, таблиц, разделителей из тире/звёздочек (---, ***),
+  без чекбоксов [ ]. Только обычный текст и дефисы для списков.
 - Не повторяй одну мысль разными словами в разных абзацах.
 
 ДЛИНА: строго 2800–3800 знаков с пробелами (примерно 400–540 слов). Это важно: пост должен
@@ -193,6 +194,8 @@ def regenerate_if_wrong_length(topic, article, attempts=2):
 def markdown_line_to_html(line):
     """Конвертирует markdown-разметку внутри строки в Telegram HTML: **bold** -> <b>bold</b>."""
     line = escape_html(line)
+    # [текст ссылки](url) -> просто текст ссылки, без адреса
+    line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
     # **bold** или __bold__
     line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
     line = re.sub(r"__(.+?)__", r"<b>\1</b>", line)
@@ -263,6 +266,11 @@ def format_article_html(article):
             i += 1
             continue
 
+        # горизонтальный разделитель markdown (---, ***, ___) — просто убираем, без замены
+        if re.fullmatch(r"[\-\*_]{3,}", line.replace(" ", "")):
+            i += 1
+            continue
+
         # markdown-таблица: собираем все подряд идущие строки с "|"
         if line.startswith("|") and line.endswith("|"):
             table_block = []
@@ -281,10 +289,13 @@ def format_article_html(article):
             title_done = True
             continue
 
-        # маркер списка "- " или "* " в начале строки -> "• "
+        # маркер списка "- "/"* "/"⁃ " в начале строки -> универсальный "- "
         bullet_match = re.match(r"^[\-\*⁃–—•]\s+(.*)", line)
         if bullet_match:
-            html_parts.append(f"• {markdown_line_to_html(bullet_match.group(1))}")
+            content = bullet_match.group(1)
+            # убираем чекбокс-разметку "[ ] " или "[x] ", если модель её добавила
+            content = re.sub(r"^\[[ xX]?\]\s*", "", content)
+            html_parts.append(f"- {markdown_line_to_html(content)}")
             i += 1
             continue
 
