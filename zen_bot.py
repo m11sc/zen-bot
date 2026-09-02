@@ -313,6 +313,37 @@ def escape_html(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def safe_truncate_html(html, limit):
+    """
+    Обрезает HTML-текст до limit знаков по границе абзаца (\n\n), не разрывая слова,
+    и закрывает все незакрытые теги <b>/<i>, чтобы Telegram не отклонил сообщение
+    из-за битой разметки.
+    """
+    if len(html) <= limit:
+        return html
+
+    paragraphs = html.split("\n\n")
+    kept = []
+    total = 0
+    for p in paragraphs:
+        addition = len(p) + (2 if kept else 0)
+        if total + addition > limit:
+            break
+        kept.append(p)
+        total += addition
+
+    truncated = "\n\n".join(kept) if kept else html[:limit]
+
+    # закрываем незакрытые теги, если абзац оборвался посреди форматирования
+    for tag in ("b", "i"):
+        opens = truncated.count(f"<{tag}>")
+        closes = truncated.count(f"</{tag}>")
+        if opens > closes:
+            truncated += f"</{tag}>" * (opens - closes)
+
+    return truncated
+
+
 def send_to_telegram(topic, article):
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]  # username канала (@my_channel) или его числовой id (-100...)
@@ -323,25 +354,29 @@ def send_to_telegram(topic, article):
 
     # Подстраховка: если из-за HTML-разметки (<b> и т.д.) текст всё же не влез —
     # просим модель сократить именно исходный текст и форматируем заново, а не режем на части.
-    attempts = 0
-    while len(formatted) > safe_limit and attempts < 2:
-        print(f"После форматирования пост {len(formatted)} знаков — длиннее лимита, сокращаю...", flush=True)
+    # Каждая попытка просит более жёсткую цель, если предыдущая не помогла.
+    shrink_targets = [(2400, 2800), (1900, 2300), (1400, 1800)]
+    attempt = 0
+    while len(formatted) > safe_limit and attempt < len(shrink_targets):
+        lo, hi = shrink_targets[attempt]
+        print(f"После форматирования пост {len(formatted)} знаков — длиннее лимита, сокращаю до {lo}-{hi}...", flush=True)
         shrink_prompt = f"""Вот пост:
 
 {article}
 
-Он получился слишком длинным для одного сообщения Telegram. Сократи его до 2500–3000 знаков
-с пробелами, сохранив стиль, крючок в начале и главную мысль. Убери менее важные детали,
-а не просто обрывай текст. Ответь только сокращённым текстом поста."""
-        article = ask_groq(shrink_prompt, max_tokens=4000)
+Он получился слишком длинным для одного сообщения Telegram. Сократи его СТРОГО до {lo}–{hi} знаков
+с пробелами (это жёсткое требование, не превышай {hi}). Сохрани стиль, крючок в начале и главную
+мысль, убери менее важные детали и примеры, а не просто обрывай текст на середине.
+Ответь только сокращённым текстом поста."""
+        article = ask_groq(shrink_prompt, max_tokens=3000)
         formatted = format_article_html(article)
-        attempts += 1
+        attempt += 1
 
+    # Финальная гарантия: если модель всё равно не уложилась — аккуратно обрезаем сами
+    # по границе абзаца и закрываем незакрытые HTML-теги, чтобы пост точно ушёл.
     if len(formatted) > safe_limit:
-        raise RuntimeError(
-            f"Пост всё ещё превышает лимит Telegram после сокращения ({len(formatted)} знаков). "
-            "Запустите бота ещё раз."
-        )
+        print(f"Модель не уложилась в лимит ({len(formatted)} знаков) — обрезаю вручную.", flush=True)
+        formatted = safe_truncate_html(formatted, safe_limit)
 
     resp = requests.post(url, data={
         "chat_id": chat_id,
