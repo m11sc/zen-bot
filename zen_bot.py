@@ -85,8 +85,15 @@ def ask_groq(prompt, max_tokens=3000, retries=5):
 
 def load_used_topics():
     if os.path.exists(USED_TOPICS_FILE):
-        with open(USED_TOPICS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(USED_TOPICS_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    return []
+                return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"Файл {USED_TOPICS_FILE} повреждён ({e}) — начинаю с пустого списка тем.", flush=True)
+            return []
     return []
 
 
