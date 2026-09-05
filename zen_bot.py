@@ -4,18 +4,25 @@
 
 Полностью бесплатная схема:
   - генерация текста — Groq API (бесплатный тариф, щедрый лимит — до 14 400 запросов/день)
-  - генерация картинки — Pollinations.ai (бесплатно, без API-ключа)
+  - генерация картинки — Cloudflare Workers AI, модель FLUX.1 Schnell
+    (бесплатный тариф: 10 000 нейронов/день — сотни картинок)
   - публикация — Telegram Bot API, прямо в канал (бесплатно)
   - расписание — GitHub Actions (бесплатно) или cron на своём ПК
 
 Что нужно перед запуском:
 1. pip install groq requests --break-system-packages
 2. Получить бесплатный ключ Groq: https://console.groq.com/keys (регистрация бесплатная)
-3. Создать Telegram-бота через @BotFather, получить токен
-4. Создать Telegram-канал (или использовать существующий), добавить бота
+3. Создать бесплатный аккаунт Cloudflare: https://dash.cloudflare.com
+   - Перейти в раздел AI → Workers AI → "Use REST API"
+   - Создать API-токен (Create Workers AI API Token) — это CF_API_TOKEN
+   - Скопировать Account ID со страницы — это CF_ACCOUNT_ID
+4. Создать Telegram-бота через @BotFather, получить токен
+5. Создать Telegram-канал (или использовать существующий), добавить бота
    в канал как АДМИНИСТРАТОРА (с правом публикации сообщений)
-5. Переменные окружения:
+6. Переменные окружения:
    GROQ_API_KEY        — ключ API Groq (бесплатный)
+   CF_ACCOUNT_ID       — Account ID из Cloudflare
+   CF_API_TOKEN        — API-токен Workers AI из Cloudflare
    TELEGRAM_BOT_TOKEN  — токен бота от @BotFather
    TELEGRAM_CHAT_ID    — username канала вида @my_channel (если канал публичный)
                          или числовой id канала вида -1001234567890 (если приватный)
@@ -479,22 +486,31 @@ def generate_image_prompt(topic, article):
 
 
 def fetch_image_bytes(image_prompt, retries=3):
-    """Получает картинку с бесплатного сервиса Pollinations.ai (без API-ключа)."""
-    import urllib.parse
-    encoded = urllib.parse.quote(image_prompt)
-    seed = int(time.time())
-    url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&nologo=true&seed={seed}&model=flux&enhance=true"
-    )
+    """Получает картинку через Cloudflare Workers AI (модель FLUX.1 Schnell) —
+    бесплатный тариф: 10 000 нейронов в день (сотни картинок), заметно выше качество,
+    чем у Pollinations. Требует CF_ACCOUNT_ID и CF_API_TOKEN."""
+    account_id = os.environ["CF_ACCOUNT_ID"]
+    api_token = os.environ["CF_API_TOKEN"]
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
 
     for attempt in range(retries):
         try:
-            resp = requests.get(url, timeout=60)
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {api_token}"},
+                json={"prompt": image_prompt, "seed": int(time.time()) % 1000000},
+                timeout=60,
+            )
             resp.raise_for_status()
-            if resp.headers.get("content-type", "").startswith("image/"):
-                return resp.content
-            raise ValueError(f"Сервис вернул не картинку: {resp.headers.get('content-type')}")
+            data = resp.json()
+
+            if not data.get("success", True) and "result" not in data:
+                raise ValueError(f"Cloudflare вернул ошибку: {data.get('errors')}")
+
+            # FLUX.1 Schnell возвращает картинку как base64 в поле result.image
+            b64_image = data["result"]["image"]
+            import base64
+            return base64.b64decode(b64_image)
         except Exception as e:
             wait = 10 * (attempt + 1)
             print(f"Не удалось получить картинку ({e}). Пробую снова через {wait} сек...", flush=True)
@@ -579,7 +595,7 @@ if __name__ == "__main__":
 # Вариант B — GitHub Actions (не нужен свой сервер, бесплатно):
 #   1. Положить этот файл и requirements.txt в репозиторий на GitHub.
 #   2. В настройках репозитория: Settings → Secrets and variables → Actions
-#      добавить GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+#      добавить GROQ_API_KEY, CF_ACCOUNT_ID, CF_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 #   3. Создать файл .github/workflows/daily.yml:
 #
 #      name: daily-article
@@ -597,9 +613,12 @@ if __name__ == "__main__":
 #              with:
 #                python-version: '3.11'
 #            - run: pip install groq requests
-#            - run: python3 zen_bot.py
+#            - run: python3 -u zen_bot.py
 #              env:
+#                PYTHONUNBUFFERED: "1"
 #                GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+#                CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+#                CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
 #                TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 #                TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 #            - run: |
