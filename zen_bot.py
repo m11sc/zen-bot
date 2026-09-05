@@ -38,12 +38,14 @@ import requests
 
 # ---------- Настройки ----------
 
-TELEGRAM_MESSAGE_LIMIT = 4096  # жёсткий лимит Telegram на одно сообщение
+TELEGRAM_MESSAGE_LIMIT = 4096   # лимит Telegram на обычное текстовое сообщение (без фото)
+TELEGRAM_CAPTION_LIMIT = 1024   # лимит Telegram на подпись к фото — используем именно его,
+                                 # так как пост теперь всегда идёт как подпись под картинкой
 
-# Целевая длина самого текста статьи (без HTML-тегов). Взята с запасом от лимита Telegram,
-# чтобы после добавления <b>...</b> для заголовка/подзаголовков пост всё равно помещался в одно сообщение.
-TARGET_MIN_CHARS = 2800
-TARGET_MAX_CHARS = 3800
+# Целевая длина самого текста поста (без HTML-тегов). Взята с запасом от лимита подписи (1024),
+# чтобы после добавления <b>...</b> для заголовка пост всё равно помещался в одну подпись к фото.
+TARGET_MIN_CHARS = 650
+TARGET_MAX_CHARS = 850
 
 # Общая ниша канала — задаёт тон и рамку для тем.
 # Отредактируйте под свой канал (сейчас настроено под "Апгрейд" — саморазвитие).
@@ -58,6 +60,12 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
+class EmptyResponseError(Exception):
+    """Модель вернула пустой ответ — обычно из-за того, что reasoning-модель потратила
+    весь бюджет токенов на внутренние 'размышления' и не успела написать сам ответ."""
+    pass
+
+
 def ask_groq(prompt, max_tokens=3000, retries=5):
     for attempt in range(retries):
         try:
@@ -65,9 +73,18 @@ def ask_groq(prompt, max_tokens=3000, retries=5):
                 model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=max_tokens,
+                reasoning_effort="low",  # меньше "размышлений" — больше шансов уложиться в токены
                 timeout=120,
             )
-            return resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content
+            if not content or not content.strip():
+                raise EmptyResponseError("Модель вернула пустой ответ")
+            return content.strip()
+        except EmptyResponseError as e:
+            wait = 15 * (attempt + 1)
+            print(f"{e}. Увеличиваю бюджет токенов и пробую снова через {wait} сек...", flush=True)
+            max_tokens = int(max_tokens * 1.5)  # даём больше места на "размышления" + ответ
+            time.sleep(wait)
         except (groq_errors.RateLimitError, groq_errors.APIStatusError, groq_errors.APIConnectionError) as e:
             status_code = getattr(e, "status_code", None)
             if status_code == 404:
@@ -132,40 +149,33 @@ def generate_topic():
 def generate_article(topic):
     prompt = f"""Ты ведёшь популярный Telegram-канал о саморазвитии с сотней тысяч подписчиков —
 в духе крупных каналов этой ниши (как «Психология саморазвития», «Сила слов» и похожие).
-Напиши пост на тему: «{topic}»
+Напиши короткий пост-подпись к фото на тему: «{topic}»
 
-КАК ПИШУТ ТАКИЕ КАНАЛЫ (обязательно копируй этот стиль, не пиши как формальную статью):
-- Первая строка — не сухой заголовок, а цепляющий крючок: провокационное утверждение, вопрос
-  в лоб или неожиданный факт. Читатель должен захотеть дочитать после первой же строки.
-- Дальше — короткие абзацы по 1-3 предложения. Между абзацами всегда пустая строка.
-- Обязательно один конкретный пример или мини-история в середине текста — про обычного человека,
-  историческую личность или ситуацию из жизни. Без общих рассуждений, только конкретика.
-- Разговорный тон, будто пишешь другу: обращение на "вы", живые формулировки, можно короткие
-  риторические вопросы к читателю.
-- Если нужен список — оформляй через дефис в начале строки (- пункт), никаких формальных
-  подзаголовков-заголовков секций, никакой академической структуры "введение/основная часть/вывод".
-  Текст должен течь как единая история, а не как статья с разделами.
-- В конце — не сухой вывод, а короткая мысль-вывод (1-2 предложения) и лёгкое вовлечение читателя:
-  вопрос, приглашение поделиться своим опытом, или фраза, подталкивающая задуматься.
-- Один-два уместных эмодзи по тексту для визуальных акцентов — не больше, без спама эмодзи.
+Это короткий формат — как подпись под фото в Instagram или Telegram, а не полноценная статья.
+Ёмкость важнее объёма: одна яркая мысль, поданная метко, а не попытка раскрыть тему полностью.
+
+КАК ПИШУТ ТАКИЕ КАНАЛЫ (обязательно копируй этот стиль):
+- Первая строка — цепляющий крючок: провокационное утверждение, вопрос в лоб или неожиданный
+  факт. Читатель должен захотеть дочитать после первой же строки.
+- Короткие абзацы по 1-2 предложения. Между абзацами пустая строка.
+- Один короткий конкретный пример или образ — без развёрнутой истории, буквально одна яркая деталь
+  или сравнение, которое иллюстрирует мысль.
+- Разговорный тон, будто пишешь другу: обращение на "вы", живые формулировки.
+- Никаких списков, подзаголовков, разделов — только цельный короткий текст, льющийся как одна мысль.
+- Концовка — короткая фраза-вывод или вопрос к читателю для вовлечения (1 строка).
+- Максимум один уместный эмодзи в конце, не больше.
 
 ЧЕГО ИЗБЕГАТЬ:
-- Никакого канцелярита и штампов: "актуальность темы", "в данной статье", "подводя итог",
-  "это важно", "многие сталкиваются с этой проблемой".
-- Никаких markdown-символов: без **, ##, |, таблиц, разделителей из тире/звёздочек (---, ***),
-  без чекбоксов [ ]. Только обычный текст и дефисы для списков.
-- Не повторяй одну мысль разными словами в разных абзацах.
+- Никакого канцелярита: "актуальность темы", "в данной статье", "подводя итог", "это важно".
+- Никаких markdown-символов: **, ##, |, таблиц, разделителей (---, ***), чекбоксов [ ], списков.
+- Не пытайся раскрыть тему со всех сторон — только одна мысль, метко поданная.
 
-ДЛИНА: строго 2800–3800 знаков с пробелами (примерно 400–540 слов). Это важно: пост должен
-целиком помещаться в ОДНО сообщение Telegram (лимит 4096 знаков), поэтому не превышай верхнюю
-границу — лучше чуть короче и ёмче, чем длиннее.
-
-Прежде чем писать, продумай: какая одна мысль должна зацепить читателя и остаться в голове
-после прочтения? Весь пост должен вести именно к ней.
+ДЛИНА: строго 650–850 знаков с пробелами (примерно 90-120 слов). Это критично важно: пост
+идёт подписью к фото в Telegram, а лимит подписи — 1024 знака. Лучше короче и ёмче, чем длиннее.
 
 Ответь только готовым текстом поста, без комментариев до или после."""
 
-    article = ask_groq(prompt, max_tokens=6000)
+    article = ask_groq(prompt, max_tokens=2000)
     return article
 
 
@@ -177,14 +187,14 @@ def regenerate_if_wrong_length(topic, article, attempts=2):
             return article
 
         direction = "короче" if length > TARGET_MAX_CHARS else "длиннее"
-        fix_prompt = f"""Вот статья на тему «{topic}»:
+        fix_prompt = f"""Вот пост на тему «{topic}»:
 
 {article}
 
-Текущая длина: {length} знаков. Нужно {direction}, чтобы уложиться СТРОГО в 3300–5700 знаков
-с пробелами. Перепиши статью целиком с учётом этого, сохранив стиль и структуру."""
+Текущая длина: {length} знаков. Нужно {direction}, чтобы уложиться СТРОГО в {TARGET_MIN_CHARS}–{TARGET_MAX_CHARS}
+знаков с пробелами. Перепиши пост целиком с учётом этого, сохранив стиль и главную мысль."""
 
-        article = ask_groq(fix_prompt, max_tokens=6000)
+        article = ask_groq(fix_prompt, max_tokens=2000)
 
     return article
 
@@ -363,39 +373,68 @@ def safe_truncate_html(html, limit):
     return truncated
 
 
-def send_to_telegram(topic, article):
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]  # username канала (@my_channel) или его числовой id (-100...)
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
+def prepare_formatted_post(article, char_limit):
+    """
+    Форматирует статью под HTML и гарантирует, что итоговый текст уложится в char_limit знаков —
+    сначала пробует попросить модель сократить, а если не получится, обрезает сама по границе
+    абзаца. Возвращает (formatted_html, article_text_used).
+    """
     formatted = format_article_html(article)
-    safe_limit = TELEGRAM_MESSAGE_LIMIT - 50  # небольшой запас на всякий случай
+    safe_limit = char_limit - 30  # небольшой запас на всякий случай
 
-    # Подстраховка: если из-за HTML-разметки (<b> и т.д.) текст всё же не влез —
-    # просим модель сократить именно исходный текст и форматируем заново, а не режем на части.
-    # Каждая попытка просит более жёсткую цель, если предыдущая не помогла.
-    shrink_targets = [(2400, 2800), (1900, 2300), (1400, 1800)]
+    shrink_targets = [
+        (int(char_limit * 0.55), int(char_limit * 0.65)),
+        (int(char_limit * 0.40), int(char_limit * 0.50)),
+        (int(char_limit * 0.25), int(char_limit * 0.35)),
+    ]
     attempt = 0
     while len(formatted) > safe_limit and attempt < len(shrink_targets):
         lo, hi = shrink_targets[attempt]
-        print(f"После форматирования пост {len(formatted)} знаков — длиннее лимита, сокращаю до {lo}-{hi}...", flush=True)
+        print(f"После форматирования пост {len(formatted)} знаков — длиннее лимита ({char_limit}), сокращаю до {lo}-{hi}...", flush=True)
         shrink_prompt = f"""Вот пост:
 
 {article}
 
-Он получился слишком длинным для одного сообщения Telegram. Сократи его СТРОГО до {lo}–{hi} знаков
-с пробелами (это жёсткое требование, не превышай {hi}). Сохрани стиль, крючок в начале и главную
-мысль, убери менее важные детали и примеры, а не просто обрывай текст на середине.
-Ответь только сокращённым текстом поста."""
-        article = ask_groq(shrink_prompt, max_tokens=3000)
-        formatted = format_article_html(article)
+Он получился слишком длинным. Сократи его СТРОГО до {lo}–{hi} знаков с пробелами (жёсткое
+требование, не превышай {hi}). Сохрани стиль, крючок в начале и главную мысль, убери менее
+важные детали, а не обрывай текст на середине. Ответь только сокращённым текстом поста."""
+        previous_article = article
+        try:
+            article = ask_groq(shrink_prompt, max_tokens=1500)
+        except Exception as e:
+            print(f"Не удалось сократить пост ({e}) — оставляю предыдущую версию.", flush=True)
+            article = previous_article
+            break
+        new_formatted = format_article_html(article)
+        if not new_formatted.strip():
+            print("Сокращённая версия оказалась пустой — оставляю предыдущую.", flush=True)
+            article = previous_article
+            break
+        formatted = new_formatted
         attempt += 1
 
-    # Финальная гарантия: если модель всё равно не уложилась — аккуратно обрезаем сами
-    # по границе абзаца и закрываем незакрытые HTML-теги, чтобы пост точно ушёл.
     if len(formatted) > safe_limit:
         print(f"Модель не уложилась в лимит ({len(formatted)} знаков) — обрезаю вручную.", flush=True)
         formatted = safe_truncate_html(formatted, safe_limit)
+
+    return formatted, article
+
+
+def send_photo_with_caption(image_bytes, article):
+    """Отправляет фото с текстом поста как подписью — одно сообщение в канале.
+    Возвращает True при успехе."""
+    formatted, _ = prepare_formatted_post(article, TELEGRAM_CAPTION_LIMIT)
+    send_photo_to_telegram(image_bytes, formatted)
+    return True
+
+
+def send_to_telegram(topic, article):
+    """Запасной путь: отправка обычным текстовым сообщением, если картинку не удалось получить."""
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]  # username канала (@my_channel) или его числовой id (-100...)
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    formatted, _ = prepare_formatted_post(article, TELEGRAM_MESSAGE_LIMIT)
 
     resp = requests.post(url, data={
         "chat_id": chat_id,
@@ -407,28 +446,36 @@ def send_to_telegram(topic, article):
     resp.raise_for_status()
 
 
+
 # ---------- Шаг 4. Сгенерировать и отправить картинку к посту ----------
 
-def generate_image_prompt(topic):
-    """Просит модель придумать короткий промпт на английском для генерации картинки — так
-    качество генерации через Pollinations выше, чем при промпте на русском."""
-    prompt = f"""Придумай короткий промпт на английском языке для генерации иллюстрации
-к посту на тему: «{topic}»
+def generate_image_prompt(topic, article):
+    """Просит модель придумать короткий промпт на английском для генерации картинки —
+    опираясь на конкретный образ/пример из УЖЕ НАПИСАННОГО текста поста, а не на абстрактную
+    тему, чтобы картинка реально соответствовала содержанию, а не была случайной."""
+    prompt = f"""Вот пост, который был опубликован в Telegram-канале о саморазвитии:
+
+{article}
+
+Придумай короткий промпт на английском языке для генерации иллюстрации к ЭТОМУ конкретному
+посту.
 
 Требования:
+- Найди в тексте поста конкретный образ, пример, сравнение или сцену (не абстрактную идею
+  вроде "саморазвитие" или "мотивация") и опиши именно её визуально.
 - Стиль: минималистичная плоская иллюстрация (flat illustration), мягкие тёплые цвета,
-  без текста и надписей на картинке, без человеческих лиц крупным планом.
-- Промпт должен описывать конкретную визуальную сцену или метафору, связанную с темой поста,
-  а не абстрактные слова вроде "самосовершенствование".
-- Длина: одна строка, 10-20 слов на английском.
+  спокойная эстетика, без текста и надписей на картинке, без человеческих лиц крупным планом.
+- Промпт должен описывать одну конкретную визуальную сцену, которую можно нарисовать —
+  предметы, обстановку, действие, а не общие понятия.
+- Длина: одна строка, 12-20 слов на английском.
 
 Ответь только текстом промпта, без пояснений и кавычек."""
 
     try:
-        return ask_groq(prompt, max_tokens=100, retries=2)
+        return ask_groq(prompt, max_tokens=500, retries=2)
     except Exception as e:
         print(f"Не удалось придумать промпт для картинки ({e}) — использую тему напрямую.", flush=True)
-        return topic
+        return f"minimalist flat illustration, warm colors, concept of {topic}, no text"
 
 
 def fetch_image_bytes(image_prompt, retries=3):
@@ -436,7 +483,10 @@ def fetch_image_bytes(image_prompt, retries=3):
     import urllib.parse
     encoded = urllib.parse.quote(image_prompt)
     seed = int(time.time())
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}"
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1024&height=1024&nologo=true&seed={seed}&model=flux&enhance=true"
+    )
 
     for attempt in range(retries):
         try:
@@ -453,15 +503,19 @@ def fetch_image_bytes(image_prompt, retries=3):
     return None
 
 
-def send_photo_to_telegram(image_bytes):
-    """Отправляет картинку в канал отдельным сообщением, без подписи (текст поста идёт следом)."""
+def send_photo_to_telegram(image_bytes, caption_html):
+    """Отправляет картинку с подписью — фото и текст уходят ОДНИМ сообщением в канал."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
 
     resp = requests.post(
         url,
-        data={"chat_id": chat_id},
+        data={
+            "chat_id": chat_id,
+            "caption": caption_html,
+            "parse_mode": "HTML",
+        },
         files={"photo": ("image.jpg", image_bytes, "image/jpeg")},
         timeout=60,
     )
@@ -477,28 +531,31 @@ def main():
     topic = generate_topic()
     print(f"Тема: {topic}", flush=True)
 
-    print("Пишу статью...", flush=True)
+    print("Пишу пост...", flush=True)
     article = generate_article(topic)
     article = regenerate_if_wrong_length(topic, article)
 
     print(f"Готово. Длина: {len(article)} знаков.", flush=True)
 
     print("Придумываю картинку...", flush=True)
-    image_prompt = generate_image_prompt(topic)
+    image_prompt = generate_image_prompt(topic, article)
     print(f"Промпт картинки: {image_prompt}", flush=True)
     image_bytes = fetch_image_bytes(image_prompt)
 
+    published = False
     if image_bytes:
-        print("Отправляю картинку в Telegram...", flush=True)
+        print("Отправляю фото с подписью в Telegram (одним сообщением)...", flush=True)
         try:
-            send_photo_to_telegram(image_bytes)
+            send_photo_with_caption(image_bytes, article)
+            published = True
         except Exception as e:
-            print(f"Не удалось отправить картинку ({e}) — публикую только текст.", flush=True)
+            print(f"Не удалось отправить фото с подписью ({e}) — публикую только текст.", flush=True)
     else:
         print("Картинка не получена — публикую только текст.", flush=True)
 
-    print("Отправляю текст в Telegram...", flush=True)
-    send_to_telegram(topic, article)
+    if not published:
+        print("Отправляю текст в Telegram...", flush=True)
+        send_to_telegram(topic, article)
 
     save_used_topic(topic)
     print("Готово! Проверьте Telegram.", flush=True)
